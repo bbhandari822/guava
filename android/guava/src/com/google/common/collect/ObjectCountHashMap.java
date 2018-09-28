@@ -113,7 +113,7 @@ class ObjectCountHashMap<K> {
     init(DEFAULT_SIZE, DEFAULT_LOAD_FACTOR);
   }
 
-  ObjectCountHashMap(ObjectCountHashMap<K> map) {
+  ObjectCountHashMap(ObjectCountHashMap<? extends K> map) {
     init(map.size(), DEFAULT_LOAD_FACTOR);
     for (int i = map.firstIndex(); i != -1; i = map.nextIndex(i)) {
       put(map.getKey(i), map.getValue(i));
@@ -260,6 +260,16 @@ class ObjectCountHashMap<K> {
     return (HASH_MASK & entry) | (NEXT_MASK & newNext);
   }
 
+  void ensureCapacity(int minCapacity) {
+    if (minCapacity > entries.length) {
+      resizeEntries(minCapacity);
+    }
+    if (minCapacity >= threshold) {
+      int newTableSize = Math.max(2, Integer.highestOneBit(minCapacity - 1) << 1);
+      resizeTable(newTableSize);
+    }
+  }
+
   @CanIgnoreReturnValue
   public int put(@NullableDecl K key, int value) {
     checkPositive(value, "count");
@@ -394,11 +404,6 @@ class ObjectCountHashMap<K> {
     return remove(key, smearedHash(key));
   }
 
-  @CanIgnoreReturnValue
-  int removeEntry(int entryIndex) {
-    return remove(keys[entryIndex], getHash(entries[entryIndex]));
-  }
-
   private int remove(@NullableDecl Object key, int hash) {
     int tableIndex = hash & hashTableMask();
     int next = table[tableIndex];
@@ -429,6 +434,11 @@ class ObjectCountHashMap<K> {
       next = getNext(entries[next]);
     } while (next != UNSET);
     return 0;
+  }
+
+  @CanIgnoreReturnValue
+  int removeEntry(int entryIndex) {
+    return remove(keys[entryIndex], getHash(entries[entryIndex]));
   }
 
   /**

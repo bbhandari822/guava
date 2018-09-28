@@ -18,7 +18,6 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.annotations.Beta;
 import com.google.common.annotations.GwtIncompatible;
-import com.google.common.base.Throwables;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.google.j2objc.annotations.Weak;
 import java.util.concurrent.TimeUnit;
@@ -121,10 +120,10 @@ import org.checkerframework.checker.nullness.compatqual.NullableDecl;
  *
  * <pre>{@code
  * public class SafeBox<V> {
+ *   private V value;
  *   private final ReentrantLock lock = new ReentrantLock();
  *   private final Condition valuePresent = lock.newCondition();
  *   private final Condition valueAbsent = lock.newCondition();
- *   private V value;
  *
  *   public V get() throws InterruptedException {
  *     lock.lock();
@@ -166,18 +165,10 @@ import org.checkerframework.checker.nullness.compatqual.NullableDecl;
  *
  * <pre>{@code
  * public class SafeBox<V> {
- *   private final Monitor monitor = new Monitor();
- *   private final Monitor.Guard valuePresent = new Monitor.Guard(monitor) {
- *     public boolean isSatisfied() {
- *       return value != null;
- *     }
- *   };
- *   private final Monitor.Guard valueAbsent = new Monitor.Guard(monitor) {
- *     public boolean isSatisfied() {
- *       return value == null;
- *     }
- *   };
  *   private V value;
+ *   private final Monitor monitor = new Monitor();
+ *   private final Monitor.Guard valuePresent = monitor.newGuard(() -> value != null);
+ *   private final Monitor.Guard valueAbsent = monitor.newGuard(() -> value == null);
  *
  *   public V get() throws InterruptedException {
  *     monitor.enterWhen(valuePresent);
@@ -372,15 +363,6 @@ public final class Monitor {
   }
 
   /**
-   * Enters this monitor. Blocks indefinitely, but may be interrupted.
-   *
-   * @throws InterruptedException if interrupted while waiting
-   */
-  public void enterInterruptibly() throws InterruptedException {
-    lock.lockInterruptibly();
-  }
-
-  /**
    * Enters this monitor. Blocks at most the given time.
    *
    * @return whether the monitor was entered
@@ -407,6 +389,15 @@ public final class Monitor {
         Thread.currentThread().interrupt();
       }
     }
+  }
+
+  /**
+   * Enters this monitor. Blocks indefinitely, but may be interrupted.
+   *
+   * @throws InterruptedException if interrupted while waiting
+   */
+  public void enterInterruptibly() throws InterruptedException {
+    lock.lockInterruptibly();
   }
 
   /**
@@ -447,28 +438,6 @@ public final class Monitor {
     try {
       if (!guard.isSatisfied()) {
         await(guard, signalBeforeWaiting);
-      }
-      satisfied = true;
-    } finally {
-      if (!satisfied) {
-        leave();
-      }
-    }
-  }
-
-  /** Enters this monitor when the guard is satisfied. Blocks indefinitely. */
-  public void enterWhenUninterruptibly(Guard guard) {
-    if (guard.monitor != this) {
-      throw new IllegalMonitorStateException();
-    }
-    final ReentrantLock lock = this.lock;
-    boolean signalBeforeWaiting = lock.isHeldByCurrentThread();
-    lock.lock();
-
-    boolean satisfied = false;
-    try {
-      if (!guard.isSatisfied()) {
-        awaitUninterruptibly(guard, signalBeforeWaiting);
       }
       satisfied = true;
     } finally {
@@ -533,6 +502,28 @@ public final class Monitor {
         } finally {
           lock.unlock();
         }
+      }
+    }
+  }
+
+  /** Enters this monitor when the guard is satisfied. Blocks indefinitely. */
+  public void enterWhenUninterruptibly(Guard guard) {
+    if (guard.monitor != this) {
+      throw new IllegalMonitorStateException();
+    }
+    final ReentrantLock lock = this.lock;
+    boolean signalBeforeWaiting = lock.isHeldByCurrentThread();
+    lock.lock();
+
+    boolean satisfied = false;
+    try {
+      if (!guard.isSatisfied()) {
+        awaitUninterruptibly(guard, signalBeforeWaiting);
+      }
+      satisfied = true;
+    } finally {
+      if (!satisfied) {
+        leave();
       }
     }
   }
@@ -627,30 +618,6 @@ public final class Monitor {
   }
 
   /**
-   * Enters this monitor if the guard is satisfied. Blocks indefinitely acquiring the lock, but does
-   * not wait for the guard to be satisfied, and may be interrupted.
-   *
-   * @return whether the monitor was entered, which guarantees that the guard is now satisfied
-   * @throws InterruptedException if interrupted while waiting
-   */
-  public boolean enterIfInterruptibly(Guard guard) throws InterruptedException {
-    if (guard.monitor != this) {
-      throw new IllegalMonitorStateException();
-    }
-    final ReentrantLock lock = this.lock;
-    lock.lockInterruptibly();
-
-    boolean satisfied = false;
-    try {
-      return satisfied = guard.isSatisfied();
-    } finally {
-      if (!satisfied) {
-        lock.unlock();
-      }
-    }
-  }
-
-  /**
    * Enters this monitor if the guard is satisfied. Blocks at most the given time acquiring the
    * lock, but does not wait for the guard to be satisfied.
    *
@@ -663,6 +630,30 @@ public final class Monitor {
     if (!enter(time, unit)) {
       return false;
     }
+
+    boolean satisfied = false;
+    try {
+      return satisfied = guard.isSatisfied();
+    } finally {
+      if (!satisfied) {
+        lock.unlock();
+      }
+    }
+  }
+
+  /**
+   * Enters this monitor if the guard is satisfied. Blocks indefinitely acquiring the lock, but does
+   * not wait for the guard to be satisfied, and may be interrupted.
+   *
+   * @return whether the monitor was entered, which guarantees that the guard is now satisfied
+   * @throws InterruptedException if interrupted while waiting
+   */
+  public boolean enterIfInterruptibly(Guard guard) throws InterruptedException {
+    if (guard.monitor != this) {
+      throw new IllegalMonitorStateException();
+    }
+    final ReentrantLock lock = this.lock;
+    lock.lockInterruptibly();
 
     boolean satisfied = false;
     try {
@@ -743,19 +734,6 @@ public final class Monitor {
   }
 
   /**
-   * Waits for the guard to be satisfied. Waits indefinitely. May be called only by a thread
-   * currently occupying this monitor.
-   */
-  public void waitForUninterruptibly(Guard guard) {
-    if (!((guard.monitor == this) & lock.isHeldByCurrentThread())) {
-      throw new IllegalMonitorStateException();
-    }
-    if (!guard.isSatisfied()) {
-      awaitUninterruptibly(guard, true);
-    }
-  }
-
-  /**
    * Waits for the guard to be satisfied. Waits at most the given time, and may be interrupted. May
    * be called only by a thread currently occupying this monitor.
    *
@@ -774,6 +752,19 @@ public final class Monitor {
       throw new InterruptedException();
     }
     return awaitNanos(guard, timeoutNanos, true);
+  }
+
+  /**
+   * Waits for the guard to be satisfied. Waits indefinitely. May be called only by a thread
+   * currently occupying this monitor.
+   */
+  public void waitForUninterruptibly(Guard guard) {
+    if (!((guard.monitor == this) & lock.isHeldByCurrentThread())) {
+      throw new IllegalMonitorStateException();
+    }
+    if (!guard.isSatisfied()) {
+      awaitUninterruptibly(guard, true);
+    }
   }
 
   /**
@@ -1015,7 +1006,7 @@ public final class Monitor {
       return guard.isSatisfied();
     } catch (Throwable throwable) {
       signalAllWaiters();
-      throw Throwables.propagate(throwable);
+      throw throwable;
     }
   }
 

@@ -20,7 +20,6 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.annotations.GwtCompatible;
 import com.google.common.annotations.GwtIncompatible;
-import com.google.common.collect.Multiset.Entry;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.errorprone.annotations.concurrent.LazyInit;
 import com.google.j2objc.annotations.WeakOuter;
@@ -28,6 +27,7 @@ import java.io.Serializable;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
+import java.util.Set;
 import org.checkerframework.checker.nullness.compatqual.MonotonicNonNullDecl;
 import org.checkerframework.checker.nullness.compatqual.NullableDecl;
 
@@ -151,11 +151,20 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
         return result;
       }
     }
-
     ImmutableMultiset.Builder<E> builder =
         new ImmutableMultiset.Builder<E>(Multisets.inferDistinctElements(elements));
     builder.addAll(elements);
     return builder.build();
+  }
+
+  /**
+   * Returns an immutable multiset containing the given elements, in the "grouped iteration order"
+   * described in the class documentation.
+   *
+   * @throws NullPointerException if any of {@code elements} is null
+   */
+  public static <E> ImmutableMultiset<E> copyOf(Iterator<? extends E> elements) {
+    return new ImmutableMultiset.Builder<E>().addAll(elements).build();
   }
 
   private static <E> ImmutableMultiset<E> copyFromElements(E... elements) {
@@ -169,16 +178,6 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
       builder.addCopies(entry.getElement(), entry.getCount());
     }
     return builder.build();
-  }
-
-  /**
-   * Returns an immutable multiset containing the given elements, in the "grouped iteration order"
-   * described in the class documentation.
-   *
-   * @throws NullPointerException if any of {@code elements} is null
-   */
-  public static <E> ImmutableMultiset<E> copyOf(Iterator<? extends E> elements) {
-    return new ImmutableMultiset.Builder<E>().addAll(elements).build();
   }
 
   ImmutableMultiset() {}
@@ -310,14 +309,14 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
     return (es == null) ? (entrySet = createEntrySet()) : es;
   }
 
-  private final ImmutableSet<Entry<E>> createEntrySet() {
+  private ImmutableSet<Entry<E>> createEntrySet() {
     return isEmpty() ? ImmutableSet.<Entry<E>>of() : new EntrySet();
   }
 
   abstract Entry<E> getEntry(int index);
 
   @WeakOuter
-  private final class EntrySet extends ImmutableSet.Indexed<Entry<E>> {
+  private final class EntrySet extends IndexedImmutableSet<Entry<E>> {
     @Override
     boolean isPartialView() {
       return ImmutableMultiset.this.isPartialView();
@@ -351,9 +350,8 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
       return ImmutableMultiset.this.hashCode();
     }
 
-    // We can't label this with @Override, because it doesn't override anything
-    // in the GWT emulated version.
-    // TODO(cpovirk): try making all copies of this method @GwtIncompatible instead
+    @GwtIncompatible
+    @Override
     Object writeReplace() {
       return new EntrySetSerializedForm<E>(ImmutableMultiset.this);
     }
@@ -361,6 +359,7 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
     private static final long serialVersionUID = 0;
   }
 
+  @GwtIncompatible
   static class EntrySetSerializedForm<E> implements Serializable {
     final ImmutableMultiset<E> multiset;
 
@@ -373,8 +372,8 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
     }
   }
 
-  // We can't label this with @Override, because it doesn't override anything
-  // in the GWT emulated version.
+  @GwtIncompatible
+  @Override
   abstract Object writeReplace();
 
   /**
@@ -450,6 +449,20 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
     }
 
     /**
+     * Adds each element of {@code elements} to the {@code ImmutableMultiset}.
+     *
+     * @param elements the elements to add
+     * @return this {@code Builder} object
+     * @throws NullPointerException if {@code elements} is null or contains a null element
+     */
+    @CanIgnoreReturnValue
+    @Override
+    public Builder<E> add(E... elements) {
+      super.add(elements);
+      return this;
+    }
+
+    /**
      * Adds a number of occurrences of an element to this {@code ImmutableMultiset}.
      *
      * @param element the element to add
@@ -509,20 +522,6 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
     /**
      * Adds each element of {@code elements} to the {@code ImmutableMultiset}.
      *
-     * @param elements the elements to add
-     * @return this {@code Builder} object
-     * @throws NullPointerException if {@code elements} is null or contains a null element
-     */
-    @CanIgnoreReturnValue
-    @Override
-    public Builder<E> add(E... elements) {
-      super.add(elements);
-      return this;
-    }
-
-    /**
-     * Adds each element of {@code elements} to the {@code ImmutableMultiset}.
-     *
      * @param elements the {@code Iterable} to add to the {@code ImmutableMultiset}
      * @return this {@code Builder} object
      * @throws NullPointerException if {@code elements} is null or contains a null element
@@ -532,8 +531,18 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
     public Builder<E> addAll(Iterable<? extends E> elements) {
       if (elements instanceof Multiset) {
         Multiset<? extends E> multiset = Multisets.cast(elements);
-        for (Entry<? extends E> entry : multiset.entrySet()) {
-          addCopies(entry.getElement(), entry.getCount());
+        ObjectCountHashMap<? extends E> backingMap = tryGetMap(multiset);
+        if (backingMap != null) {
+          contents.ensureCapacity(Math.max(contents.size(), backingMap.size()));
+          for (int i = backingMap.firstIndex(); i >= 0; i = backingMap.nextIndex(i)) {
+            addCopies(backingMap.getKey(i), backingMap.getValue(i));
+          }
+        } else {
+          Set<? extends Entry<? extends E>> entries = multiset.entrySet();
+          contents.ensureCapacity(Math.max(contents.size(), entries.size())); // might overlap
+          for (Entry<? extends E> entry : multiset.entrySet()) {
+            addCopies(entry.getElement(), entry.getCount());
+          }
         }
       } else {
         super.addAll(elements);
@@ -553,6 +562,22 @@ public abstract class ImmutableMultiset<E> extends ImmutableMultisetGwtSerializa
     public Builder<E> addAll(Iterator<? extends E> elements) {
       super.addAll(elements);
       return this;
+    }
+
+    /**
+     * If the specified collection is backed by an ObjectCountHashMap, it will be much more
+     * efficient to iterate over it by index rather than an entry iterator, which will need to
+     * allocate an object for each entry, so we check for that.
+     */
+    @NullableDecl
+    static <T> ObjectCountHashMap<T> tryGetMap(Iterable<T> multiset) {
+      if (multiset instanceof RegularImmutableMultiset) {
+        return ((RegularImmutableMultiset<T>) multiset).contents;
+      } else if (multiset instanceof AbstractMapBasedMultiset) {
+        return ((AbstractMapBasedMultiset<T>) multiset).backingMap;
+      } else {
+        return null;
+      }
     }
 
     /**
